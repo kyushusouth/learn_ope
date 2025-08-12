@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from itertools import permutations
+from itertools import permutations, product
 from typing import Callable, Optional, Tuple, Union
 
 import numpy as np
@@ -414,6 +414,258 @@ class SyntheticSlateBanditDataset(BaseBanditDataset):
             pscore=pscore,
             pscore_item_position=pscore_item_position,
         )
+
+    def calc_on_policy_policy_value(
+        self, reward: np.ndarray, slate_id: np.ndarray
+    ) -> float:
+        """Calculate the policy value of given reward and slate_id.
+
+        Parameters
+        -----------
+        reward: array-like, shape (<= n_rounds * len_list,)
+            Slot-level rewards, i.e., :math:`r_{i}(l)`.
+
+        slate_id: array-like, shape (<= n_rounds * len_list,)
+            Slate index.
+
+        Returns
+        ----------
+        policy_value: float
+            The on-policy policy value estimate of the behavior policy.
+
+        """
+        return reward.sum() / np.unique(slate_id).shape[0]
+
+    def obtain_pscore_given_evaluation_policy_logit(
+        self,
+        action: np.ndarray,
+        evaluation_policy_logit_: np.ndarray,
+        return_pscore_item_position: bool = True,
+        clip_logit_value: Optional[float] = None,
+    ):
+        """Calculate the propensity score given particular logit values to define the evaluation policy.
+
+        Parameters
+        ------------
+        action: array-like, (n_rounds * len_list, )
+            Action chosen by the behavior policy.
+
+        evaluation_policy_logit_: array-like, (n_rounds, n_unique_action)
+            Logit values to define the evaluation policy.
+
+        return_pscore_item_position: bool, default=True
+            Whether to compute `pscore_item_position` and include it in the logged data.
+            When `n_actions` and `len_list` are large, `return_pscore_item_position`=True can lead to a long computation time.
+
+        clip_logit_value: Optional[float], default=None
+            A float parameter used to clip logit values (<= `700.`).
+            When None, clipping is not applied to softmax values when obtaining `pscore_item_position`.
+            When a float value is given, logit values are clipped when calculating softmax values.
+            When `n_actions` and `len_list` are large, `clip_logit_value`=None can lead to a long computation time.
+
+        """
+        n_rounds = action.reshape((-1, self.len_list)).shape[0]
+        pscore_cascade = np.zeros(n_rounds * self.len_list)
+        pscore = np.zeros(n_rounds * self.len_list)
+
+        if return_pscore_item_position:
+            pscore_item_position = np.zeros(n_rounds * self.len_list)
+            if not self.is_factorizable:
+                enumerated_slate_actions = [
+                    _
+                    for _ in permutations(
+                        np.arange(self.n_unique_action), self.len_list
+                    )
+                ]
+                enumerated_slate_actions = np.array(enumerated_slate_actions)
+        else:
+            pscore_item_position = None
+
+        if return_pscore_item_position and clip_logit_value is not None:
+            evaluation_policy_softmax_ = np.exp(
+                np.minimum(evaluation_policy_logit_, clip_logit_value)
+            )
+
+        for i in tqdm(
+            np.arange(n_rounds),
+            desc="[obtain_pscore_given_evaluation_policy_logit]",
+            total=n_rounds,
+        ):
+            unique_action_set = np.arange(self.n_unique_action)
+            score_ = softmax(evaluation_policy_logit_[i : i + 1])[0]
+            pscore_i = 1.0
+
+            for pos_ in np.arange(self.len_list):
+                action_ = action[i * self.len_list + pos_]
+                action_index_ = np.where(unique_action_set == action_)[0][0]
+                pscore_i *= score_[action_index_]
+                pscore_cascade[i * self.len_list + pos_] = pscore_i
+
+                if not self.is_factorizable and pos_ != self.len_list - 1:
+                    unique_action_set = np.delete(
+                        unique_action_set, unique_action_set == action_
+                    )
+                    score_ = softmax(
+                        evaluation_policy_logit_[i : i + 1, unique_action_set]
+                    )[0]
+
+                if return_pscore_item_position:
+                    if pos_ == 0:
+                        pscore_item_pos_i_l = pscore_i
+                    elif self.is_factorizable:
+                        pscore_item_pos_i_l = score_[action_index_]
+                    else:
+                        if isinstance(clip_logit_value, float):
+                            pscores = self._calc_pscore_given_policy_softmax(
+                                all_slate_actions=enumerated_slate_actions,
+                                policy_softmax_i_=evaluation_policy_softmax_[i],
+                            )
+                        else:
+                            pscores = self._calc_pscore_given_policy_logit(
+                                all_slate_actions=enumerated_slate_actions,
+                                policy_logit_i_=evaluation_policy_logit_[i],
+                            )
+                        pscore_item_pos_i_l = pscores[
+                            enumerated_slate_actions[:, pos_] == action_
+                        ].sum()
+                    pscore_item_position[i * self.len_list + pos_] = pscore_item_pos_i_l
+
+            start_idx = i * self.len_list
+            end_idx = start_idx + self.len_list
+            pscore[start_idx:end_idx] = pscore_i
+
+        return pscore, pscore_item_position, pscore_cascade
+
+    def calc_ground_truth_policy_value(
+        self,
+        context: np.ndarray,
+        evaluation_policy_logit_: np.ndarray,
+    ):
+        """Calculate the ground-truth policy value of given evaluation policy logit and contexts.
+
+        Parameters
+        -----------
+        context: array-like, shape (n_rounds, dim_context)
+            Context vectors characterizing each data (such as user information).
+
+        evaluation_policy_logit_: array-like, shape (n_rounds, n_unique_action)
+            Logit values to define the evaluation policy.
+
+        """
+        if self.is_factorizable:
+            enumerated_slate_actions = [
+                _
+                for _ in product(np.arange(self.n_unique_action), repeat=self.len_list)
+            ]
+        else:
+            enumerated_slate_actions = [
+                _ for _ in permutations(np.arange(self.n_unique_action), self.len_list)
+            ]
+        enumerated_slate_actions = np.array(enumerated_slate_actions).astype("int8")
+        n_slate_actions = len(enumerated_slate_actions)
+        n_rounds = len(evaluation_policy_logit_)
+
+        pscores = []
+        n_enumerated_slate_actions = len(enumerated_slate_actions)
+        if self.is_factorizable:
+            for action_list in tqdm(
+                enumerated_slate_actions,
+                desc="[calc_ground_truth_policy_value (pscore)]",
+                total=n_enumerated_slate_actions,
+            ):
+                pscores.append(
+                    softmax(evaluation_policy_logit_)[:, action_list].prod(1)
+                )
+            pscores = np.array(pscores).T
+        else:
+            for i in tqdm(
+                np.arange(n_rounds),
+                desc="[calc_ground_truth_policy_value (pscore)]",
+                total=n_rounds,
+            ):
+                pscores.append(
+                    self._calc_pscore_given_policy_logit(
+                        all_slate_actions=enumerated_slate_actions,
+                        policy_logit_i_=evaluation_policy_logit_[i],
+                    )
+                )
+            pscores = np.array(pscores)
+
+        # calculate expected slate-level reward for each combinatorial set of items (i.e., slate actions)
+        if self.base_reward_function is None:
+            expected_slot_reward = self.sample_contextfree_expected_reward(
+                random_state=self.random_state
+            )
+            expected_slot_reward_tile = np.tile(
+                expected_slot_reward, (n_rounds * n_slate_actions, 1, 1)
+            )
+            expected_slate_rewards = np.array(
+                [
+                    expected_slot_reward_tile[
+                        np.arange(n_slate_actions) % n_slate_actions,
+                        np.array(enumerated_slate_actions)[:, pos_],
+                        pos_,
+                    ]
+                    for pos_ in np.arange(self.len_list)
+                ]
+            ).T
+            policy_value = (pscores * expected_slate_rewards.sum(axis=1)).sum()
+        else:
+            n_batch = (
+                n_rounds * n_enumerated_slate_actions * self.len_list - 1
+            ) // 10**7 + 1
+            batch_size = (n_rounds - 1) // n_batch + 1
+            n_batch = (n_rounds - 1) // batch_size + 1
+
+            policy_value = 0.0
+            for batch_idx in tqdm(
+                np.arange(n_batch),
+                desc=f"[calc_ground_truth_policy_value (expected reward), batch_size={batch_size}]",
+                total=n_batch,
+            ):
+                context_ = context[
+                    batch_idx * batch_size : (batch_idx + 1) * batch_size
+                ]
+                pscores_ = pscores[
+                    batch_idx * batch_size : (batch_idx + 1) * batch_size
+                ]
+
+                expected_slate_rewards_ = self.reward_function(
+                    context=context_,
+                    action_context=self.action_context,
+                    action=enumerated_slate_actions.flatten(),
+                    action_interaction_weight_matrix=self.action_interaction_weight_matrix,
+                    base_reward_function=self.base_reward_function,
+                    reward_type=self.reward_type,
+                    reward_structure=self.reward_structure,
+                    len_list=self.len_list,
+                    is_enumerated=True,
+                    random_state=self.random_state,
+                )
+
+                # click models based on expected reward
+                expected_slate_rewards_ *= self.exam_weight
+                if self.reward_type == "binary":
+                    discount_factors = np.ones(expected_slate_rewards_.shape[0])
+                    previous_slot_expected_reward = np.zeros(
+                        expected_slate_rewards_.shape[0]
+                    )
+                    for pos_ in np.arange(self.len_list):
+                        discount_factors *= (
+                            previous_slot_expected_reward * self.attractiveness[pos_]
+                            + (1 - previous_slot_expected_reward)
+                        )
+                        expected_slate_rewards_[:, pos_] = (
+                            discount_factors * expected_slate_rewards_[:, pos_]
+                        )
+                        previous_slot_expected_reward = expected_slate_rewards_[:, pos_]
+
+                policy_value += (
+                    pscores_.flatten() * expected_slate_rewards_.sum(axis=1)
+                ).sum()
+            policy_value /= n_rounds
+
+        return policy_value
 
 
 def linear_behavior_policy_logit(
