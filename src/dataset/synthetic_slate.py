@@ -53,10 +53,9 @@ class SyntheticSlateBanditDataset(BaseBanditDataset):
             self.exam_weight = np.ones(self.len_list, dtype=float)
 
         if self.reward_structure in ["cascade_additive", "standard_additive"]:
-            # generate additive action interaction weight matrix of (n_unique_action, n_unique_action)
             self.action_interaction_weight_matrix = generate_symmetric_matrix(
                 n_unique_action=self.n_unique_action, random_state=self.random_state
-            )
+            )  # (n_unique_action, n_unique_action)
 
     def sample_action_and_obtain_pscore(
         self,
@@ -315,9 +314,12 @@ class SyntheticSlateBanditDataset(BaseBanditDataset):
                 expected_reward_factual_at_position = (
                     discount_factors * expected_reward_factual[:, pos_]
                 )
-                sampled_rewards_at_position = self.random_.binomial(
-                    n=1, p=expected_reward_factual_at_position
-                )
+                try:
+                    sampled_rewards_at_position = self.random_.binomial(
+                        n=1, p=expected_reward_factual_at_position
+                    )
+                except:
+                    breakpoint()
                 sampled_reward_list.append(sampled_rewards_at_position)
             reward = np.array(sampled_reward_list).T
         elif self.reward_type == "continuous":
@@ -344,6 +346,29 @@ class SyntheticSlateBanditDataset(BaseBanditDataset):
         return_pscore_item_position: bool,
         clip_logit_value: Optional[float] = None,
     ) -> BanditFeedback:
+        """Obtain batch logged bandit data.
+
+        Parameters
+        ----------
+        n_rounds: int
+            Data size of the synthetic logged bandit data.
+
+        return_pscore_item_position: bool, default=True
+            Whether to compute `pscore_item_position` and include it in the logged data.
+            When `n_unique_action` and `len_list` are large, this should be set to False due to computation time.
+
+        clip_logit_value: Optional[float], default=None
+            A float parameter to clip logit values.
+            When None, we calculate softmax values without clipping to obtain `pscore_item_position`.
+            When a float value is given, we clip logit values to calculate softmax values to obtain `pscore_item_position`.
+            When `n_actions` and `len_list` are large, `clip_logit_value`=None can lead to a long computation time.
+
+        Returns
+        ---------
+        bandit_feedback: BanditFeedback
+            Synthesized slate logged bandit dataset.
+
+        """
         context = self.random_.normal(0.0, 1.0, size=(n_rounds, self.dim_context))
 
         if self.behavior_policy_function is None:
@@ -552,6 +577,7 @@ class SyntheticSlateBanditDataset(BaseBanditDataset):
             Logit values to define the evaluation policy.
 
         """
+        breakpoint()
         if self.is_factorizable:
             enumerated_slate_actions = [
                 _

@@ -3,7 +3,7 @@ from pathlib import Path
 import numpy as np
 
 from dataset.synthetic import logistic_reward_function
-from dataset.synthtic_slate import (
+from dataset.synthetic_slate import (
     SyntheticSlateBanditDataset,
     linear_behavior_policy_logit,
 )
@@ -32,21 +32,20 @@ def main():
         reward_type="binary",
         reward_structure="cascade_additive",
         click_model="cascade",
-        behavior_policy_function=linear_behavior_policy_logit,
+        behavior_policy_function=None,
         base_reward_function=logistic_reward_function,
         random_state=random_state,
         is_factorizable=False,
         eta=1.0,
     )
+
     bandit_feedback = dataset.obtain_batch_bandit_feedback(
         n_rounds=n_rounds, return_pscore_item_position=True
     )
-    policy_value = dataset.calc_on_policy_policy_value(
-        reward=bandit_feedback["reward"],
-        slate_id=bandit_feedback["slate_id"],
-    )
 
     random_policy_logit_ = np.zeros((n_rounds, n_unique_action))
+
+    # 期待報酬に従う確率分布が最適な方策
     base_expected_reward = dataset.base_reward_function(
         context=bandit_feedback["context"],
         action_context=dataset.action_context,
