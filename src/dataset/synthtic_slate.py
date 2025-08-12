@@ -28,7 +28,7 @@ class SyntheticSlateBanditDataset(BaseBanditDataset):
     reward_type: str
     reward_structure: str
     click_model: str
-    eta: float
+    eta: float = 1.0
 
     def __post_init__(self):
         self.random_ = np.random.default_rng(self.random_state)
@@ -342,7 +342,7 @@ class SyntheticSlateBanditDataset(BaseBanditDataset):
         self,
         n_rounds: int,
         return_pscore_item_position: bool,
-        clip_logit_value: Optional[float],
+        clip_logit_value: Optional[float] = None,
     ) -> BanditFeedback:
         context = self.random_.normal(0.0, 1.0, size=(n_rounds, self.dim_context))
 
