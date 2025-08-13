@@ -1,1 +1,12 @@
-seed: 42
+random_state: 42
+n_rounds: 1000
+n_unique_action: 10
+len_list: 5
+dim_context: 2
+behavior_policy_function: linear
+reward_type: binary
+reward_structure: cascade_additive
+click_model: cascade
+is_factorizable: true
+eta: 0.0
+lambda_: 0.2
