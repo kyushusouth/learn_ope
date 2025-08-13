@@ -452,3 +452,478 @@ class SlateCascadeDoublyRobust(BaseSlateOffPolicyEstimator):
     len_list: int
     n_unique_action: int
     estimator_name: str = "cascade-dr"
+
+    def _estimate_round_rewards(
+        self,
+        action: np.ndarray,
+        reward: np.ndarray,
+        position: np.ndarray,
+        behavior_policy_pscore: np.ndarray,
+        evaluation_policy_pscore: np.ndarray,
+        q_hat: np.ndarray,
+        evaluation_policy_action_dist: np.ndarray,
+        **kwargs,
+    ) -> np.ndarray:
+        """Estimate rewards for each slate and slot (position).
+
+        Parameters
+        ----------
+        action: array-like, (n_rounds * len_list,)
+            Actions observed at each slot in a ranking/slate in logged bandit data, i.e., :math:`a_{i}(l)`,
+            which is chosen by the behavior policy :math:`\\pi_b`.
+
+        reward: array-like, shape (n_rounds * len_list,)
+            Slot-level rewards observed for each data in logged bandit data, i.e., :math:`r_{i}(l)`.
+
+        position: array-like, shape (n_rounds * len_list,)
+            Indices to differentiate slots/positions in a slate/ranking.
+
+        pscore_cascade: array-like, shape (n_rounds * len_list,)
+            Joint probabilities of behavior policy choosing a particular sequence of actions from the top position to the :math:`l`-th position (:math:`a_{1:l}`). This type of action choice probabilities corresponds to the cascade model.
+
+        evaluation_policy_pscore_cascade: array-like, shape (n_rounds * len_list,)
+            Joint probabilities of evaluation policy choosing a particular sequence of actions from the top position to the :math:`l`-th position (:math:`a_{1:l}`). This type of action choice probabilities corresponds to the cascade model.
+
+        q_hat: array-like (n_rounds * len_list * n_unique_actions, )
+            :math:`\\hat{Q}_l` for all unique actions,
+            i.e., :math:`\\hat{Q}_{i,l}(x_i, a_i(1), \\ldots, a_i(l-1), a_i(l)) \\forall a_i(l) \\in \\mathcal{A}`.
+
+        evaluation_policy_action_dist: array-like (n_rounds * len_list * n_unique_actions, )
+            Plackett-luce style action distribution induced by evaluation policy
+            (action choice probabilities at each slot given previous action choices)
+            , i.e., :math:`\\pi_e(a_i(l) | x_i, a_i(1), \\ldots, a_i(l-1)) \\forall a_i(l) \\in \\mathcal{A}`.
+
+        Returns
+        ----------
+        estimated_rewards: array-like, shape (n_rounds * len_list,)
+            Rewards rewards for each slate and slot (position).
+
+        """
+        q_hat_3d = q_hat.reshape((-1, self.len_list, self.n_unique_action))
+
+        q_hat_for_observed_action = []
+        for i in range(self.n_rounds_):
+            for pos_ in range(self.len_list):
+                q_hat_for_observed_action.append(
+                    q_hat_3d[i, pos_, action[i * self.len_list + pos_]]
+                )
+        q_hat_for_observed_action = np.array(
+            q_hat_for_observed_action
+        )  # (n_rounds, len_list)
+
+        expected_q_hat_under_eval_policy = (
+            (evaluation_policy_action_dist * q_hat)
+            .reshape((-1, self.len_list, self.n_unique_action))
+            .sum(axis=2)
+            .flatten()
+        )  # (n_rounds, len_list)
+
+        iw = evaluation_policy_pscore / behavior_policy_pscore
+        iw_prev = np.roll(iw, 1)
+        iw_prev[np.array([i * self.len_list for i in range(self.n_rounds_)])] = 1
+
+        estimated_rewards = (
+            iw * (reward - q_hat_for_observed_action)
+            + iw_prev * expected_q_hat_under_eval_policy
+        )
+        return estimated_rewards
+
+    def estimate_policy_value(
+        self,
+        slate_id: np.ndarray,
+        action: np.ndarray,
+        reward: np.ndarray,
+        position: np.ndarray,
+        pscore_cascade: np.ndarray,
+        evaluation_policy_pscore_cascade: np.ndarray,
+        q_hat: np.ndarray,
+        evaluation_policy_action_dist: np.ndarray,
+        **kwargs,
+    ) -> float:
+        """Estimate the policy value of evaluation policy.
+
+        Parameters
+        ----------
+        slate_id: array-like, shape (n_rounds * len_list,)
+            Indices to differentiate slates (i.e., ranking or list of actions)
+
+        action: array-like, (n_rounds * len_list,)
+            Actions observed at each slot in a ranking/slate in logged bandit data, i.e., :math:`a_{i}(l)`,
+            which is chosen by the behavior policy :math:`\\pi_b`.
+
+        reward: array-like, shape (n_rounds * len_list,)
+            Slot-level rewards observed for each data in logged bandit data, i.e., :math:`r_{i}(l)`.
+
+        position: array-like, shape (n_rounds * len_list,)
+            Indices to differentiate slots/positions in a slate/ranking.
+
+        pscore_cascade: array-like, shape (n_rounds * len_list,)
+            Joint probabilities of behavior policy choosing a particular sequence of actions from the top position to the :math:`l`-th position (:math:`a_{1:l}`).
+
+        evaluation_policy_pscore_cascade: array-like, shape (n_rounds * len_list,)
+            Joint probabilities of evaluation policy choosing a particular sequence of actions from the top position to the :math:`l`-th position (:math:`a_{1:l}`). This type of action choice probabilities corresponds to the cascade model.
+
+
+        q_hat: array-like (n_rounds * len_list * n_unique_actions, )
+            :math:`\\hat{Q}_l` for all unique actions,
+            i.e., :math:`\\hat{Q}_{i,l}(x_i, a_i(1), \\ldots, a_i(l-1), a_i(l)) \\forall a_i(l) \\in \\mathcal{A}`.
+
+        evaluation_policy_action_dist: array-like (n_rounds * len_list * n_unique_actions, )
+            Plackett-luce style action distribution induced by evaluation policy
+            (action choice probabilities at each slot given previous action choices)
+            , i.e., :math:`\\pi_e(a_i(l) | x_i, a_i(1), \\ldots, a_i(l-1)) \\forall a_i(l) \\in \\mathcal{A}`.
+
+        Returns
+        ----------
+        V_hat: array-like, shape (n_rounds * len_list,)
+            Estimated policy value of evaluation policy.
+
+        """
+        self.n_rounds_ = np.unique(slate_id).shape[0]
+        return (
+            self._estimate_round_rewards(
+                action=action,
+                reward=reward,
+                position=position,
+                behavior_policy_pscore=pscore_cascade,
+                evaluation_policy_pscore=evaluation_policy_pscore_cascade,
+                q_hat=q_hat,
+                evaluation_policy_action_dist=evaluation_policy_action_dist,
+            ).sum()
+            / self.n_rounds_
+        )
+
+    def estimate_interval(
+        self,
+        slate_id: np.ndarray,
+        action: np.ndarray,
+        reward: np.ndarray,
+        position: np.ndarray,
+        pscore_cascade: np.ndarray,
+        evaluation_policy_pscore_cascade: np.ndarray,
+        q_hat: np.ndarray,
+        evaluation_policy_action_dist: np.ndarray,
+        alpha: float = 0.05,
+        n_bootstrap_samples: int = 10000,
+        random_state: Optional[int] = None,
+        **kwargs,
+    ) -> Dict[str, float]:
+        """Estimate the confidence interval of the policy value using bootstrap.
+
+        Parameters
+        ----------
+        slate_id: array-like, shape (n_rounds * len_list,)
+            Indices to differentiate slates (i.e., ranking or list of actions)
+
+        action: array-like, (n_rounds * len_list,)
+            Actions observed at each slot in a ranking/slate in logged bandit data, i.e., :math:`a_{i}(l)`,
+            which is chosen by the behavior policy :math:`\\pi_b`.
+
+        reward: array-like, shape (n_rounds * len_list,)
+            Slot-level rewards observed for each data in logged bandit data, i.e., :math:`r_{i}(l)`.
+
+        position: array-like, shape (n_rounds * len_list,)
+            Indices to differentiate slots/positions in a slate/ranking.
+
+        pscore_cascade: array-like, shape (n_rounds * len_list,)
+            Joint probabilities of behavior policy choosing a particular sequence of actions from the top position to the :math:`l`-th position (:math:`a_{1:l}`).
+
+        evaluation_policy_pscore_cascade: array-like, shape (n_rounds * len_list,)
+            Joint probabilities of evaluation policy choosing a particular sequence of actions from the top position to the :math:`l`-th position (:math:`a_{1:l}`). This type of action choice probabilities corresponds to the cascade model.
+
+
+        q_hat: array-like (n_rounds * len_list * n_unique_actions, )
+            :math:`\\hat{Q}_l` for all unique actions,
+            i.e., :math:`\\hat{Q}_{i,l}(x_i, a_i(1), \\ldots, a_i(l-1), a_i(l)) \\forall a_i(l) \\in \\mathcal{A}`.
+
+        evaluation_policy_action_dist: array-like (n_rounds * len_list * n_unique_actions, )
+            Plackett-luce style action distribution induced by evaluation policy
+            (action choice probabilities at each slot given previous action choices)
+            , i.e., :math:`\\pi_e(a_i(l) | x_i, a_i(1), \\ldots, a_i(l-1)) \\forall a_i(l) \\in \\mathcal{A}`.
+
+        alpha: float, default=0.05
+            Significance level.
+
+        n_bootstrap_samples: int, default=10000
+            Number of resampling performed in bootstrap sampling.
+
+        random_state: int, default=None
+            Controls the random seed in bootstrap sampling.
+
+        Returns
+        ----------
+        estimated_confidence_interval: Dict[str, float]
+            Dictionary storing the estimated mean and upper-lower confidence bounds.
+
+        """
+        self.n_rounds_ = np.unique(slate_id).shape[0]
+        estimated_rewards = self._estimate_round_rewards(
+            action=action,
+            reward=reward,
+            position=position,
+            behavior_policy_pscore=pscore_cascade,
+            evaluation_policy_pscore=evaluation_policy_pscore_cascade,
+            q_hat=q_hat,
+            evaluation_policy_action_dist=evaluation_policy_action_dist,
+        )
+        return self._estimate_slate_confidence_interval_by_bootstrap(
+            slate_id=slate_id,
+            estimated_rewards=estimated_rewards,
+            alpha=alpha,
+            n_bootstrap_samples=n_bootstrap_samples,
+            random_state=random_state,
+        )
+
+    def _estimate_slate_confidence_interval_by_bootstrap(
+        self,
+        slate_id: np.ndarray,
+        estimated_rewards: np.ndarray,
+        alpha: float = 0.05,
+        n_bootstrap_samples: int = 10000,
+        random_state: Optional[int] = None,
+    ) -> Dict[str, float]:
+        """Estimate the confidence interval of the policy value using bootstrap.
+
+        Parameters
+        ----------
+        slate_id: array-like, shape (<= n_rounds * len_list,)
+            Indices to differentiate slates (i.e., ranking or list of actions)
+
+        estimated_rewards: array-like, shape (<= n_rounds * len_list,)
+            Rewards estimated for each slate and slot (position).
+
+        alpha: float, default=0.05
+            Significance level.
+
+        n_bootstrap_samples: int, default=10000
+            Number of resampling performed in bootstrap sampling.
+
+        random_state: int, default=None
+            Controls the random seed in bootstrap sampling.
+
+        Returns
+        ----------
+        estimated_confidence_interval: Dict[str, float]
+            Dictionary storing the estimated mean and upper-lower confidence bounds.
+
+        """
+        unique_slate = np.unique(slate_id)
+        estimated_round_rewards = list()
+        for slate in unique_slate:
+            estimated_round_rewards.append(estimated_rewards[slate_id == slate].sum())
+        estimated_round_rewards = np.array(estimated_round_rewards)
+        return estimate_confidence_interval_by_bootstrap(
+            samples=estimated_round_rewards,
+            alpha=alpha,
+            n_bootstrap_samples=n_bootstrap_samples,
+            random_state=random_state,
+        )
+
+
+@dataclass
+class BaseSlateSelfNormalizedInverseProbabilityWeighting(
+    BaseSlateInverseProbabilityWeighting
+):
+    """Base Class of Self-Normalized Inverse Probability Weighting Estimators for the slate contextual bandit setting.
+
+    len_list: int (> 1)
+        Length of a list of actions in a recommendation/ranking inferface, slate size.
+        When Open Bandit Dataset is used, `len_list=3`.
+
+    """
+
+    len_list: int
+
+    def _estimate_round_rewards(
+        self,
+        reward: np.ndarray,
+        position: np.ndarray,
+        behavior_policy_pscore: np.ndarray,
+        evaluation_policy_pscore: np.ndarray,
+        **kwargs,
+    ) -> np.ndarray:
+        """Self-Normalized estimated rewards for each slate and slot (position).
+
+        Parameters
+        ----------
+        reward: array-like, shape (<= n_rounds * len_list,)
+            Slot-level rewards, i.e., :math:`r_{i}(l)`.
+
+        position: array-like, shape (<= n_rounds * len_list,)
+            Indices to differentiate slots/positions in a slate/ranking.
+
+        behavior_policy_pscore: array-like, shape (<= n_rounds * len_list,)
+            Marginal probabilities of behavior policy choosing a particular action at each position (slot) or
+            joint probabilities of behavior policy choosing a whole slate/ranking of actions.
+
+        evaluation_policy_pscore: array-like, shape (<= n_rounds * len_list,)
+            Marginal probabilities of evaluation policy choosing a particular action at each slot/position or
+            joint probabilities of evaluation policy choosing a whole slate/ranking of actions.
+
+        Returns
+        ----------
+        estimated_rewards: array-like, shape (<= n_rounds * len_list,)
+            Self-Normalized rewards estimated for each slate and slot (position).
+
+        """
+        estimated_rewards = np.zeros_like(behavior_policy_pscore)
+        iw = np.zeros_like(behavior_policy_pscore)
+        for pos_ in range(self.len_list):
+            idx = position == pos_
+            iw[idx] = evaluation_policy_pscore[idx] / behavior_policy_pscore[idx]
+            estimated_rewards[idx] = reward[idx] * iw[idx] / iw[idx].mean()
+        return estimated_rewards
+
+
+@dataclass
+class SelfNormalizedSlateStandardIPS(
+    SlateStandardIPS, BaseSlateSelfNormalizedInverseProbabilityWeighting
+):
+    """Self-Normalized Standard Inverse Propensity Scoring (SNSIPS) Estimator.
+
+    Note
+    -------
+    SNSIPS is the self-normalized version of `obp.ope.SlateStandardIPS`.
+
+    SNSIPS calculates the empirical average of importance weights
+    and normalizes the observed slate-level rewards by the empirical average of the importance weights.
+
+    A Self-Normalized estimator is not unbiased even when the behavior policy is known.
+    However, it is still consistent for the true policy value and gains some stability in OPE.
+    See the reference papers for more details.
+
+    Parameters
+    ----------
+    estimator_name: str, default='snsips'.
+        Name of the estimator.
+
+    References
+    ----------
+    James McInerney, Brian Brost, Praveen Chandar, Rishabh Mehrotra, and Ben Carterette.
+    "Counterfactual Evaluation of Slate Recommendations with Sequential Reward Interactions.", 2020.
+
+    Adith Swaminathan and Thorsten Joachims.
+    "The Self-normalized Estimator for Counterfactual Learning.", 2015.
+
+    Nathan Kallus and Masatoshi Uehara.
+    "Intrinsically Efficient, Stable, and Bounded Off-Policy Evaluation for Reinforcement Learning.", 2019.
+
+    """
+
+    estimator_name: str = "snsips"
+
+    def _estimate_round_rewards(
+        self,
+        reward: np.ndarray,
+        position: np.ndarray,
+        behavior_policy_pscore: np.ndarray,
+        evaluation_policy_pscore: np.ndarray,
+        **kwargs,
+    ) -> np.ndarray:
+        """Estimate rewards for each slate and slot (position).
+
+        Parameters
+        ----------
+        reward: array-like, shape (<= n_rounds * len_list,)
+            Slot-level rewards, i.e., :math:`r_{i}(l)`.
+
+        position: array-like, shape (<= n_rounds * len_list,)
+            Indices to differentiate slots/positions in a slate/ranking.
+
+        pscore: array-like, shape (<= n_rounds * len_list,)
+            Joint probabilities of behavior policy choosing a slate action, i.e., :math:`\\pi_b(a_i|x_i)`.
+            This parameter must be unique in each slate.
+
+        evaluation_policy_pscore: array-like, shape (<= n_rounds * len_list,)
+            Joint probabilities of evaluation policy choosing a slate action, i.e., :math:`\\pi_e(a_i|x_i)`.
+            This parameter must be unique in each slate.
+
+        Returns
+        ----------
+        estimated_rewards: array-like, shape (<= n_rounds * len_list,)
+            Rewards estimated by the SNSIPS estimator for each slate and slot (position).
+
+        """
+        estimated_rewards = np.zeros_like(behavior_policy_pscore)
+        iw = evaluation_policy_pscore / behavior_policy_pscore
+        estimated_rewards = reward * iw / iw.mean()
+        return estimated_rewards
+
+
+@dataclass
+class SelfNormalizedSlateIndependentIPS(
+    SlateIndependentIPS, BaseSlateSelfNormalizedInverseProbabilityWeighting
+):
+    """Self-Normalized Independent Inverse Propensity Scoring (SNIIPS) Estimator.
+
+    Note
+    -------
+    SNIIPS is the self-normalized version of `obp.ope.SlateIndependentIPS`.
+
+    SNIIPS calculates the slot-level empirical average of importance weights
+    and normalizes the observed slot-level rewards by the empirical average of the importance weights.
+
+    A Self-Normalized estimator is not unbiased even when the behavior policy is known.
+    However, it is still consistent for the true policy value and gains some stability in OPE.
+    See the reference papers for more details.
+
+    Parameters
+    ----------
+    estimator_name: str, default='sniips'.
+        Name of the estimator.
+
+    References
+    ----------
+    Shuai Li, Yasin Abbasi-Yadkori, Branislav Kveton, S. Muthukrishnan, Vishwa Vinay, Zheng Wen.
+    "Offline Evaluation of Ranking Policies with Click Models", 2018.
+
+    James McInerney, Brian Brost, Praveen Chandar, Rishabh Mehrotra, and Ben Carterette.
+    "Counterfactual Evaluation of Slate Recommendations with Sequential Reward Interactions.", 2020.
+
+    Adith Swaminathan and Thorsten Joachims.
+    "The Self-normalized Estimator for Counterfactual Learning.", 2015.
+
+    Nathan Kallus and Masatoshi Uehara.
+    "Intrinsically Efficient, Stable, and Bounded Off-Policy Evaluation for Reinforcement Learning.", 2019.
+
+    """
+
+    estimator_name: str = "sniips"
+
+
+@dataclass
+class SelfNormalizedSlateRewardInteractionIPS(
+    SlateRewardInteractionIPS, BaseSlateSelfNormalizedInverseProbabilityWeighting
+):
+    """Self-Normalized Reward Interaction Inverse Propensity Scoring (SNRIPS) Estimator.
+
+    Note
+    -------
+    SNRIPS is the self-normalized version of `obp.ope.SlateRewardInteractionIPS`.
+
+    SNRIPS calculates the slot-level empirical average of the importance weights
+    and normalizes the observed slot-level rewards by the empirical average of the importance weights.
+
+    A Self-Normalized estimator is not unbiased even when the behavior policy is known.
+    However, it is still consistent for the true policy value and gains some stability in OPE.
+    See the reference papers for more details.
+
+    Parameters
+    ----------
+    estimator_name: str, default='snrips'.
+        Name of the estimator.
+
+    References
+    ----------
+    James McInerney, Brian Brost, Praveen Chandar, Rishabh Mehrotra, and Ben Carterette.
+    "Counterfactual Evaluation of Slate Recommendations with Sequential Reward Interactions.", 2020.
+
+    Adith Swaminathan and Thorsten Joachims.
+    "The Self-normalized Estimator for Counterfactual Learning.", 2015.
+
+    Nathan Kallus and Masatoshi Uehara.
+    "Intrinsically Efficient, Stable, and Bounded Off-Policy Evaluation for Reinforcement Learning.", 2019.
+
+    """
+
+    estimator_name: str = "snrips"
