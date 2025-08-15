@@ -11,6 +11,6 @@ is_factorizable: true
 eta: 0.0
 lambda_: 0.4
 interaction_function: additive
-n_random_state: 10
+n_random_state: 30
 decay_function: inverse
 behavior_policy: linear
