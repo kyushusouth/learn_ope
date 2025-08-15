@@ -1,3 +1,5 @@
+from typing import Literal
+
 import yaml
 from pydantic import BaseModel
 
@@ -8,13 +10,17 @@ class Config(BaseModel):
     n_unique_action: int
     len_list: int
     dim_context: int
-    behavior_policy_function: str
-    reward_type: str
-    reward_structure: str
-    click_model: str
+    reward_type: Literal["binary"]
+    reward_structure: Literal["standard", "cascade", "independent"]
     is_factorizable: bool
     eta: float
     lambda_: float
+    interaction_function: Literal["additive", "decay"]
+    decay_function: Literal["inverse"]
+    n_random_state: int
+    behavior_policy: Literal["linear"] | None = None
+    click_model: Literal["cascade", "pbm"] | None = None
+    behavior_policy_function: str | None = None
 
     @classmethod
     def load(cls, config_path: str):

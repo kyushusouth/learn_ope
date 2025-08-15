@@ -28,7 +28,8 @@ class SyntheticSlateBanditDataset(BaseBanditDataset):
     reward_type: str
     reward_structure: str
     click_model: str
-    eta: float = 1.0
+    decay_function: str
+    eta: float
 
     def __post_init__(self):
         self.random_ = np.random.default_rng(self.random_state)
@@ -55,7 +56,25 @@ class SyntheticSlateBanditDataset(BaseBanditDataset):
         if self.reward_structure in ["cascade_additive", "standard_additive"]:
             self.action_interaction_weight_matrix = generate_symmetric_matrix(
                 n_unique_action=self.n_unique_action, random_state=self.random_state
-            )  # (n_unique_action, n_unique_action)
+            )
+        else:
+            if self.decay_function == "exponential":
+                self.decay_function = exponential_decay_function
+            else:
+                self.decay_function = inverse_decay_function
+
+            if self.reward_structure == "standard_decay":
+                self.action_interaction_weight_matrix = (
+                    self.obtain_standard_decay_action_interaction_weight_matrix()
+                )
+            elif self.reward_structure == "cascade_decay":
+                self.action_interaction_weight_matrix = (
+                    self.obtain_cascade_decay_action_interaction_weight_matrix()
+                )
+            else:
+                self.action_interaction_weight_matrix = np.zeros(
+                    (self.len_list, self.len_list)
+                )
 
     def sample_action_and_obtain_pscore(
         self,
@@ -133,7 +152,7 @@ class SyntheticSlateBanditDataset(BaseBanditDataset):
             total=n_rounds,
         ):
             unique_action_set = np.arange(self.n_unique_action)
-            score_ = softmax(behavior_policy_logit_[i : i + 1, unique_action_set])[
+            score_ = softmax(behavior_policy_logit_[i : i + 1, :])[
                 0
             ]  # (n_unique_action,)
             pscore_i = 1.0
@@ -186,6 +205,28 @@ class SyntheticSlateBanditDataset(BaseBanditDataset):
             pscore[start_idx:end_idx] = pscore_i
 
         return action, pscore_cascade, pscore, pscore_item_position
+
+    def obtain_standard_decay_action_interaction_weight_matrix(self) -> np.ndarray:
+        """Obtain an action interaction weight matrix for standard decay reward structure (symmetric matrix)"""
+        action_interaction_weight_matrix = np.identity(self.len_list)
+        for pos_ in np.arange(self.len_list):
+            action_interaction_weight_matrix[:, pos_] = -self.decay_function(
+                np.abs(np.arange(self.len_list) - pos_)
+            )
+            action_interaction_weight_matrix[pos_, pos_] = 0
+        return action_interaction_weight_matrix
+
+    def obtain_cascade_decay_action_interaction_weight_matrix(self) -> np.ndarray:
+        """Obtain an action interaction weight matrix for cascade decay reward structure (upper triangular matrix)"""
+        action_interaction_weight_matrix = np.identity(self.len_list)
+        for pos_ in np.arange(self.len_list):
+            action_interaction_weight_matrix[:, pos_] = -self.decay_function(
+                np.abs(np.arange(self.len_list) - pos_)
+            )
+            for pos_2 in np.arange(self.len_list):
+                if pos_ <= pos_2:
+                    action_interaction_weight_matrix[pos_2, pos_] = 0
+        return action_interaction_weight_matrix
 
     def _calc_pscore_given_policy_logit(
         self, all_slate_actions: np.ndarray, policy_logit_i_: np.ndarray
@@ -314,12 +355,9 @@ class SyntheticSlateBanditDataset(BaseBanditDataset):
                 expected_reward_factual_at_position = (
                     discount_factors * expected_reward_factual[:, pos_]
                 )
-                try:
-                    sampled_rewards_at_position = self.random_.binomial(
-                        n=1, p=expected_reward_factual_at_position
-                    )
-                except:
-                    breakpoint()
+                sampled_rewards_at_position = self.random_.binomial(
+                    n=1, p=expected_reward_factual_at_position
+                )
                 sampled_reward_list.append(sampled_rewards_at_position)
             reward = np.array(sampled_reward_list).T
         elif self.reward_type == "continuous":
@@ -616,7 +654,6 @@ class SyntheticSlateBanditDataset(BaseBanditDataset):
                 )
             pscores = np.array(pscores)
 
-        # calculate expected slate-level reward for each combinatorial set of items (i.e., slate actions)
         if self.base_reward_function is None:
             expected_slot_reward = self.sample_contextfree_expected_reward(
                 random_state=self.random_state
@@ -668,7 +705,6 @@ class SyntheticSlateBanditDataset(BaseBanditDataset):
                     random_state=self.random_state,
                 )
 
-                # click models based on expected reward
                 expected_slate_rewards_ *= self.exam_weight
                 if self.reward_type == "binary":
                     discount_factors = np.ones(expected_slate_rewards_.shape[0])
@@ -856,7 +892,7 @@ def action_interaction_reward_function(
     len_list: int (> 1)
         Length of a list/ranking of actions, slate size.
 
-    is_enumerate: bool
+    is_enumerated: bool
         Whether `action` corresponds to `enumerated_slate_actions`.
 
     random_state: int, default=None
@@ -877,12 +913,12 @@ def action_interaction_reward_function(
     if is_enumerated:
         action = np.tile(action, n_rounds)
 
-    action_2d = action.reshape((-1, len_list)).astype(int)
+    action_2d = action.reshape((-1, len_list)).astype("int8")
     n_enumerated_slate_actions = len(action) // n_rounds
+
     expected_reward = base_reward_function(
         context=context, action_context=action_context, random_state=random_state
     )
-
     if reward_type == "binary":
         expected_reward = logit(expected_reward)
 
@@ -892,7 +928,6 @@ def action_interaction_reward_function(
             np.arange(len(action_2d)) // n_enumerated_slate_actions,
             action_2d[:, pos_],
         ]
-
         if reward_structure == "independent":
             pass
         elif is_additive:
@@ -916,7 +951,7 @@ def action_interaction_reward_function(
                     np.arange(len(action_2d)) // n_enumerated_slate_actions,
                     action_2d[:, pos2_],
                 ]
-                weight_ = action_interaction_weight_matrix[pos_, pos2_]
+                weight_ = action_interaction_weight_matrix[pos2_, pos_]
                 tmp_fixed_reward += expected_reward_ * weight_
         expected_reward_factual[:, pos_] = tmp_fixed_reward
 
@@ -925,4 +960,34 @@ def action_interaction_reward_function(
     else:
         expected_reward_factual = np.clip(expected_reward_factual, 0, None)
 
+    assert expected_reward_factual.shape == (
+        action_2d.shape[0],
+        len_list,
+    ), (
+        f"response shape must be (n_rounds (* enumerated_slate_actions), len_list), but {expected_reward_factual.shape}"
+    )
     return expected_reward_factual
+
+
+def exponential_decay_function(distance: np.ndarray) -> np.ndarray:
+    """Calculate exponential discount factor for action interaction weight matrix.
+
+    Parameters
+    -----------
+    distance: array-like, shape (len_list, )
+        Distance between two slots.
+
+    """
+    return np.exp(-distance)
+
+
+def inverse_decay_function(distance: np.ndarray) -> np.ndarray:
+    """Calculate inverse discount factor for action interaction weight matrix.
+
+    Parameters
+    -----------
+    distance: array-like, shape (len_list, )
+        Distance between two slots.
+
+    """
+    return 1 / (distance + 1)

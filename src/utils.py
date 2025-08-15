@@ -10,9 +10,9 @@ def sigmoid(x: Union[float, np.ndarray]) -> Union[float, np.ndarray]:
 
 def softmax(x: Union[float, np.ndarray]) -> Union[float, np.ndarray]:
     """Calculate softmax function."""
-    b = np.max(x, axis=1)[:, np.newaxis]
+    b = np.max(x, axis=1)[:, None]
     numerator = np.exp(x - b)
-    denominator = np.sum(numerator, axis=1)[:, np.newaxis]
+    denominator = np.sum(numerator, axis=1)[:, None]
     return numerator / denominator
 
 
